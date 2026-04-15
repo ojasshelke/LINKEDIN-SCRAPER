@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+.env
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Browser / session data (never commit)
+linkedin_session/
+playwright_chrome_profile/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Exports / scratch
+*.xlsx
+*.csv
