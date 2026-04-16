@@ -766,7 +766,7 @@ if st.button("🚀  START AGGRESSIVE SCRAPING", use_container_width=True):
         search_url = (
             f"https://www.linkedin.com/search/results/content/"
             f"?keywords={kw_encoded}"
-            f"&datePosted=%22{apify_date_param}%22"
+            f'&datePosted="{apify_date_param}"'
             f"&sortBy=date_posted"
         )
         run_url = f"{APIFY_BASE}/acts/{ACTOR_ID}/runs?token={token}&maxItems={max_posts}"
