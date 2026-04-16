@@ -18,7 +18,7 @@ load_dotenv()
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIG
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ACTOR_ID   = "benjarapi~linkedin-post-search"
+ACTOR_ID   = "supreme_coder~linkedin-post"
 APIFY_BASE = "https://api.apify.com/v2"
 
 
@@ -334,19 +334,18 @@ with col_kw:
         value="Polaris School of Technology",
         placeholder="e.g. Polaris School of Technology, openai, #buildinpublic",
     )
-# Display label → (Apify datePosted value, client-side hour cutoff or None)
+# Display label → (LinkedIn URL datePosted value, client-side hour cutoff or None)
 TIME_OPTIONS = {
-    "Today":        ("past-24h", "today"),
-    "Past 1 Hour":  ("past-24h", 1),
-    "Past 2 Hours": ("past-24h", 2),
-    "Past 3 Hours": ("past-24h", 3),
+    "Past 1 Hour":   ("past-24h", 1),
+    "Past 2 Hours":  ("past-24h", 2),
+    "Past 3 Hours":  ("past-24h", 3),
     "Past 24 Hours": ("past-24h", None),
-    "Past Week":    ("past-week", None),
-    "Past Month":   ("past-month", None),
+    "Past Week":     ("past-week", None),
+    "Past Month":    ("past-month", None),
 }
 
 with col_tf:
-    time_label  = st.selectbox("Time Window", list(TIME_OPTIONS.keys()), index=4)
+    time_label  = st.selectbox("Time Window", list(TIME_OPTIONS.keys()), index=3)
     apify_date_param, hour_cutoff = TIME_OPTIONS[time_label]
 
 # Aggressiveness slider
@@ -446,150 +445,86 @@ def _fix_name(name: str) -> str:
 
 def parse_posts(raw_items: list) -> list:
     """
-    Parse the Apify benjarapi/linkedin-post-search response.
+    Parse the supreme_coder/linkedin-post actor response.
 
-    The actor nests author info under item['author'] (a dict) and
-    engagement counts under item['stats'] (a dict).
-    Text may contain HTML that must be stripped.
+    This actor returns FLAT fields (no nested stats/author dicts):
+      authorName, authorHeadline, authorProfilePicture,
+      numLikes, url, text (already clean), postedAtTimestamp (Unix ms), postedAtISO
     """
     posts = []
     for item in raw_items:
         if not isinstance(item, dict):
             continue
 
-        # ── Nested author object ──────────────────────────────────────────────
-        author_obj = item.get("author")
-        if not isinstance(author_obj, dict):
-            author_obj = {}
-
-        # Author name
-        author_name = _safe_str(author_obj.get("name"))
+        # ── Author ────────────────────────────────────────────────────────────
+        author_name = _safe_str(item.get("authorName"))
         if not author_name:
-            first = _safe_str(author_obj.get("first_name"))
-            last  = _safe_str(author_obj.get("last_name"))
-            author_name = f"{first} {last}".strip()
-        # Flat-root fallbacks (some actor versions surface these at root)
-        if not author_name:
-            author_name = (
-                _safe_str(item.get("authorName"))
-                or _safe_str(item.get("author_name"))
-                or "Unknown"
-            )
-        # Repair character-spaced names returned by the actor ("K a v i s h a")
-        author_name = _fix_name(author_name)
+            # fallback: build from nested author dict
+            author_obj = item.get("author") or {}
+            if isinstance(author_obj, dict):
+                first = _safe_str(author_obj.get("firstName") or author_obj.get("first_name"))
+                last  = _safe_str(author_obj.get("lastName")  or author_obj.get("last_name"))
+                author_name = f"{first} {last}".strip()
+        author_name = _fix_name(author_name) if author_name else "Unknown"
 
-        # Headline
         headline = (
-            _safe_str(author_obj.get("headline"))
-            or _safe_str(item.get("authorHeadline"))
+            _safe_str(item.get("authorHeadline"))
             or _safe_str(item.get("headline"))
             or ""
         )
 
-        # Profile photo
         photo_url = (
-            _safe_str(author_obj.get("image_url"))
-            or _safe_str(author_obj.get("profile_picture"))
-            or _safe_str(author_obj.get("imageUrl"))
-            or _safe_str(item.get("image_url"))
-            or _safe_str(item.get("imageUrl"))
+            _safe_str(item.get("authorProfilePicture"))
+            or _safe_str(item.get("authorImage"))
             or ""
         )
 
-        # ── Nested stats object ───────────────────────────────────────────────
-        stats_obj = item.get("stats")
-        if not isinstance(stats_obj, dict):
-            stats_obj = {}
-
-        # stats.total_reactions is the int count; stats.reactions is a LIST breakdown
-        likes = _safe_int(stats_obj.get("total_reactions"))
-        if likes == 0:
-            likes = _safe_int(stats_obj.get("likes")) or _safe_int(stats_obj.get("like"))
-        if likes == 0:
-            # Root-level fallback
-            for key in ("total_reactions", "likes", "numLikes", "likeCount",
-                        "totalReactions", "reactionCount"):
-                val = _safe_int(item.get(key))
-                if val > 0:
-                    likes = val
-                    break
+        # ── Likes — numLikes is a direct int ─────────────────────────────────
+        likes = _safe_int(item.get("numLikes"))
 
         # ── Post URL ─────────────────────────────────────────────────────────
-        post_url = (
-            _safe_str(item.get("post_url"))
-            or _safe_str(item.get("url"))
-            or _safe_str(item.get("postUrl"))
-            or _safe_str(item.get("permalink"))
-            or ""
-        )
+        post_url = _safe_str(item.get("url")) or _safe_str(item.get("post_url")) or ""
         if not post_url:
-            urn = _safe_str(item.get("urn") or item.get("activityUrn"))
+            urn = _safe_str(item.get("urn"))
             if urn:
                 activity_id = urn.split(":")[-1]
                 if activity_id.isdigit():
-                    post_url = (
-                        f"https://www.linkedin.com/feed/update/"
-                        f"urn:li:activity:{activity_id}/"
-                    )
+                    post_url = f"https://www.linkedin.com/feed/update/urn:li:activity:{activity_id}/"
         if not post_url:
-            continue  # skip posts with no link
+            continue
 
-        # ── Content (full clean text for filtering + snippet for display) ───────
-        raw_text = (
-            item.get("text")
-            or item.get("content")
-            or item.get("postText")
-            or item.get("commentary")
-            or ""
-        )
-        full_text  = _strip_html(str(raw_text))          # full, untruncated
-        snippet    = (full_text[:100] + "…") if len(full_text) > 100 else full_text
+        # ── Text — already plain text, no HTML stripping needed ───────────────
+        raw_text  = item.get("text") or item.get("content") or ""
+        full_text = _strip_html(str(raw_text))
+        snippet   = (full_text[:100] + "…") if len(full_text) > 100 else full_text
 
-        # ── Posted timestamp (kept for hour-level filtering) ──────────────────
-        # The actor returns posted_at as a DICT: {display_text, date, timestamp, edited}
-        _pa_obj = item.get("posted_at") or item.get("postedAt") or {}
-        if isinstance(_pa_obj, dict):
-            # Prefer the epoch ms, then ISO date string, then display_text
-            _ts_raw = (
-                _pa_obj.get("timestamp")
-                or _pa_obj.get("date")
-                or _pa_obj.get("display_text")
-            )
+        # ── Timestamp — postedAtTimestamp is Unix ms (int) ───────────────────
+        ts_ms = item.get("postedAtTimestamp")
+        if ts_ms is not None:
+            posted_at_raw = str(int(ts_ms))
         else:
-            _ts_raw = _pa_obj  # flat string / int fallback
+            posted_at_raw = str(item.get("postedAtISO") or item.get("timeSincePosted") or "")
 
-        if _ts_raw is None:
-            # Try other top-level fields
-            _ts_raw = (
-                item.get("publishedAt") or item.get("createdAt")
-                or item.get("postedDate") or item.get("timestamp")
-                or item.get("date") or item.get("relativeTime")
-                or item.get("relative_time")
-            )
-
-        posted_at_raw = str(_ts_raw).strip() if _ts_raw is not None else ""
-
-        # Format the posted-at value for display in IST (UTC +5:30)
         parsed_dt = _parse_timestamp(posted_at_raw)
         if parsed_dt:
             import datetime as _dt
             ist_dt = parsed_dt + _dt.timedelta(hours=5, minutes=30)
-            posted_display = ist_dt.strftime("%-I:%M %p · %d %b")   # e.g. "4:32 PM · 15 Apr"
+            posted_display = ist_dt.strftime("%-I:%M %p · %d %b")
         elif posted_at_raw:
             posted_display = posted_at_raw
         else:
             posted_display = ""
 
         posts.append({
-            "Author":       author_name,
-            "Headline":     headline,
-            "Likes":        likes,
-            "Post Link":    post_url,
-            "Photo URL":    photo_url,
-            "Snippet":      snippet,
-            "Posted":       posted_display,
-            "_full_text":   full_text,      # relevance filter, dropped later
-            "_posted_at":   posted_at_raw,  # hour filter, dropped later
+            "Author":     author_name,
+            "Headline":   headline,
+            "Likes":      likes,
+            "Post Link":  post_url,
+            "Photo URL":  photo_url,
+            "Snippet":    snippet,
+            "Posted":     posted_display,
+            "_full_text": full_text,
+            "_posted_at": posted_at_raw,
         })
 
     return posts
@@ -826,13 +761,16 @@ if st.button("🚀  START AGGRESSIVE SCRAPING", use_container_width=True):
 
     token = api_token.strip()
     try:
-        run_url = f"{APIFY_BASE}/acts/{ACTOR_ID}/runs?token={token}"
-        payload = {
-            "keywords":   keyword.strip(),
-            "datePosted": apify_date_param,
-            "maxPosts":   max_posts,
-            "sortBy":     "date_posted",
-        }
+        import urllib.parse
+        kw_encoded = urllib.parse.quote(keyword.strip())
+        search_url = (
+            f"https://www.linkedin.com/search/results/content/"
+            f"?keywords={kw_encoded}"
+            f"&datePosted=%22{apify_date_param}%22"
+            f"&sortBy=date_posted"
+        )
+        run_url = f"{APIFY_BASE}/acts/{ACTOR_ID}/runs?token={token}&maxItems={max_posts}"
+        payload = {"urls": [search_url]}
         resp = requests.post(run_url, json=payload, timeout=30)
         if resp.status_code not in (200, 201):
             st.error(f"❌ Apify returned {resp.status_code}: {resp.text[:400]}")
