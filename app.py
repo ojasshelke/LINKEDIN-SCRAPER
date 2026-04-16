@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 import html as html_lib
@@ -8,6 +10,10 @@ from datetime import datetime
 import pandas as pd
 import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+# Load variables from a local `.env` file (never commit `.env`).
+load_dotenv()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIG
@@ -15,12 +21,39 @@ import streamlit as st
 ACTOR_ID   = "benjarapi~linkedin-post-search"
 APIFY_BASE = "https://api.apify.com/v2"
 
+
+def _default_apify_token() -> str:
+    """
+    Token resolution order:
+    1) APIFY_TOKEN environment variable (also set via .env + load_dotenv)
+    2) Streamlit Cloud / local secrets: st.secrets['APIFY_TOKEN']
+    """
+    for key in ("APIFY_TOKEN", "APIFY_API_TOKEN"):
+        t = (os.environ.get(key) or "").strip()
+        if t:
+            return t
+    try:
+        for key in ("APIFY_TOKEN", "APIFY_API_TOKEN"):
+            try:
+                val = st.secrets[key]
+                if val:
+                    return str(val).strip()
+            except KeyError:
+                continue
+    except Exception:
+        pass
+    return ""
+
 st.set_page_config(
     page_title="LinkedIn Post Finder",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Cache the resolved token once per session so reruns don't re-read the env on every click.
+if "resolved_apify_token" not in st.session_state:
+    st.session_state["resolved_apify_token"] = _default_apify_token()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CSS
@@ -71,7 +104,7 @@ html, body, .stApp {
 }
 
 /* Avatar row */
-.avatar-row { display: flex; align-items: center; gap: 13px; margin-bottom: 13px; }
+.avatar-row { display: flex; align-items: flex-start; gap: 13px; margin-bottom: 13px; }
 .avatar-img {
     width: 54px; height: 54px; border-radius: 50%;
     object-fit: cover; flex-shrink: 0;
@@ -86,13 +119,16 @@ html, body, .stApp {
     font-size: 1.25rem; font-weight: 700; color: #93c5fd;
     letter-spacing: -.02em;
 }
-.author-meta { display: flex; flex-direction: column; min-width: 0; }
+.author-meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .card-name {
-    font-size: 1.05rem; font-weight: 700; color: #f1f5f9;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-size: 1rem; font-weight: 800; color: #f8fafc;
+    white-space: normal;
+    word-break: normal;          /* never split mid-character */
+    overflow-wrap: break-word;   /* only break long unbreakable strings (URLs etc) */
+    line-height: 1.3; letter-spacing: -.01em;
 }
 .card-hl {
-    font-size: .78rem; color: #64748b; line-height: 1.35; margin-top: 2px;
+    font-size: .78rem; color: #64748b; line-height: 1.35; margin-top: 3px;
     display: -webkit-box; -webkit-line-clamp: 2;
     -webkit-box-orient: vertical; overflow: hidden;
 }
@@ -104,6 +140,24 @@ html, body, .stApp {
     margin-bottom: 14px; flex-grow: 1;
     display: -webkit-box; -webkit-line-clamp: 3;
     -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* Date badge */
+.badge-date {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(56,189,248,.1); color: #7dd3fc;
+    padding: 5px 14px; border-radius: 999px;
+    font-weight: 600; font-size: .82rem;
+    border: 1px solid rgba(56,189,248,.22);
+    margin-bottom: 10px; width: fit-content;
+}
+.badge-date-none {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(100,116,139,.1); color: #94a3b8;
+    padding: 5px 14px; border-radius: 999px;
+    font-size: .78rem;
+    border: 1px solid rgba(100,116,139,.2);
+    margin-bottom: 10px; width: fit-content;
 }
 
 /* Reactions badge */
@@ -191,7 +245,7 @@ div[data-testid="stAlert"] { border-radius: 12px !important; }
 st.markdown("""
 <div class="hero">
     <div class="hero-title">🔍 LinkedIn Post Finder</div>
-    <div class="hero-sub">Clean results from Apify</div>
+    <div class="hero-sub">AGGRESSIVE MODE &bull; Powered by Apify &bull; Scrape every last post</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -202,25 +256,42 @@ with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/c/ca/LinkedIn_logo_initials.png", width=48)
     st.markdown("## ⚙️ Configuration")
     st.markdown("---")
-    api_token = st.text_input(
-        "🔑 Apify API Token", type="password",
-        value=os.environ.get("APIFY_TOKEN", ""),
-        help="Your secret Apify API token. Optionally set APIFY_TOKEN in your environment.",
-    )
-    st.caption("Get your token → [Apify Console](https://console.apify.com/settings/integrations)")
+
+    # Token is loaded silently from .env — not exposed in the UI.
+    api_token = st.session_state["resolved_apify_token"]
+
+    # Show a small green indicator if token is present, red if missing.
+    if api_token:
+        st.markdown(
+            '<span style="color:#4ade80;font-size:.85rem;font-weight:600;">'
+            '✅ Apify token loaded</span>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<span style="color:#f87171;font-size:.85rem;font-weight:600;">'
+            '❌ No token found — add APIFY_TOKEN to your .env file</span>',
+            unsafe_allow_html=True,
+        )
+
     st.markdown("---")
     debug_mode = st.toggle("🐛 Debug Mode", value=False)
     st.markdown("---")
-    st.info(
-        "**How it works:**\n\n"
-        "1️⃣ Enter a keyword or school name\n"
-        "2️⃣ Pick a time window\n"
-        "3️⃣ Click **START SCRAPING**\n"
-        "4️⃣ Apify scrapes LinkedIn live\n"
-        "5️⃣ Beautiful cards appear instantly!"
+    st.warning(
+        "⚠️ **Higher aggressiveness = more posts but higher Apify cost.** "
+        "300 posts ≈ $0.25 per run. 500 posts ≈ $0.40+."
     )
     st.markdown("---")
-    st.caption("LinkedIn Post Finder **v3.0**")
+    st.info(
+        "**How it works:**\n\n"
+        "1️⃣ Enter a keyword\n"
+        "2️⃣ Pick time window + aggressiveness\n"
+        "3️⃣ Click **START AGGRESSIVE SCRAPING**\n"
+        "4️⃣ Apify scrapes every possible post\n"
+        "5️⃣ Clean cards appear instantly!"
+    )
+    st.markdown("---")
+    st.caption("LinkedIn Post Finder **v4.0 — AGGRESSIVE**")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # INPUTS
@@ -232,8 +303,30 @@ with col_kw:
         value="Polaris School of Technology",
         placeholder="e.g. Polaris School of Technology, openai, #buildinpublic",
     )
+# Display label → (Apify datePosted value, client-side hour cutoff or None)
+TIME_OPTIONS = {
+    "Past 1 Hour":  ("past-24h", 1),
+    "Past 2 Hours": ("past-24h", 2),
+    "Past 3 Hours": ("past-24h", 3),
+    "Past 24 Hours": ("past-24h", None),
+    "Past Week":    ("past-week", None),
+    "Past Month":   ("past-month", None),
+}
+
 with col_tf:
-    time_period = st.selectbox("Time Window", ["past-24h", "past-week", "past-month"])
+    time_label  = st.selectbox("Time Window", list(TIME_OPTIONS.keys()), index=3)
+    apify_date_param, hour_cutoff = TIME_OPTIONS[time_label]
+
+# Aggressiveness slider
+max_posts = st.slider(
+    "🔥 Aggressiveness Level — Maximum posts to scrape",
+    min_value=50, max_value=500, value=300, step=50,
+    help=(
+        "Higher = more posts scraped = less chance of missing anything. "
+        "**300+** recommended for thorough coverage. "
+        "Apify cost scales with this value."
+    ),
+)
 
 # Strict filter toggle (inline, below inputs)
 strict_filter = st.toggle(
@@ -284,6 +377,41 @@ def _safe_int(obj) -> int:
         return 0
 
 
+def _fix_name(name: str) -> str:
+    """
+    Fix names where Apify returns every character separated by a space:
+        'K a v i s h a M .'  →  'Kavisha M.'
+        'V i v e k  R a j a n'  →  'Vivek Rajan'
+
+    Strategy: if ≥60 % of space-separated tokens are single characters,
+    the name has been character-spaced. Merge consecutive single-char
+    tokens into words; multi-char tokens (initials like 'Dr', 'MBA') stay.
+    """
+    if not name:
+        return name
+    tokens = name.split()
+    if len(tokens) < 3:
+        return name  # Short names like "Harsh Saini" are fine as-is
+
+    single = sum(1 for t in tokens if len(t) == 1)
+    if single / len(tokens) < 0.6:
+        return name  # Looks normal — leave it alone
+
+    # Merge consecutive single-char tokens into one chunk
+    chunks, buf = [], []
+    for t in tokens:
+        if len(t) == 1:
+            buf.append(t)
+        else:
+            if buf:
+                chunks.append("".join(buf))
+                buf = []
+            chunks.append(t)
+    if buf:
+        chunks.append("".join(buf))
+    return " ".join(chunks)
+
+
 def parse_posts(raw_items: list) -> list:
     """
     Parse the Apify benjarapi/linkedin-post-search response.
@@ -315,6 +443,8 @@ def parse_posts(raw_items: list) -> list:
                 or _safe_str(item.get("author_name"))
                 or "Unknown"
             )
+        # Repair character-spaced names returned by the actor ("K a v i s h a")
+        author_name = _fix_name(author_name)
 
         # Headline
         headline = (
@@ -385,14 +515,44 @@ def parse_posts(raw_items: list) -> list:
         full_text  = _strip_html(str(raw_text))          # full, untruncated
         snippet    = (full_text[:100] + "…") if len(full_text) > 100 else full_text
 
+        # ── Posted timestamp (kept for hour-level filtering) ──────────────────
+        # Try every known field; use str() so _parse_timestamp always gets a string.
+        # We check raw values (not _safe_str) first so integer epoch ms aren't lost.
+        _ts_raw = (
+            item.get("postedAt")
+            or item.get("posted_at")
+            or item.get("publishedAt")
+            or item.get("createdAt")
+            or item.get("postedDate")
+            or item.get("timestamp")
+            or item.get("date")
+            or item.get("time")
+            or item.get("relativeTime")
+            or item.get("relative_time")
+        )
+        posted_at_raw = str(_ts_raw).strip() if _ts_raw is not None else ""
+
+        # Format the posted-at value for display in IST (UTC +5:30)
+        parsed_dt = _parse_timestamp(posted_at_raw)
+        if parsed_dt:
+            import datetime as _dt
+            ist_dt = parsed_dt + _dt.timedelta(hours=5, minutes=30)
+            posted_display = ist_dt.strftime("%-I:%M %p · %d %b")   # e.g. "4:32 PM · 15 Apr"
+        elif posted_at_raw:
+            posted_display = posted_at_raw  # show raw string as-is
+        else:
+            posted_display = ""
+
         posts.append({
-            "Author":     author_name,
-            "Headline":   headline,
-            "Likes":      likes,
-            "Post Link":  post_url,
-            "Photo URL":  photo_url,
-            "Snippet":    snippet,
-            "_full_text": full_text,   # kept for relevance filtering, dropped later
+            "Author":       author_name,
+            "Headline":     headline,
+            "Likes":        likes,
+            "Post Link":    post_url,
+            "Photo URL":    photo_url,
+            "Snippet":      snippet,
+            "Posted":       posted_display,
+            "_full_text":   full_text,      # relevance filter, dropped later
+            "_posted_at":   posted_at_raw,  # hour filter, dropped later
         })
 
     return posts
@@ -440,6 +600,100 @@ def strict_keyword_filter(posts: list, keyword: str) -> tuple[list, int]:
     return kept, removed
 
 
+# Matches relative timestamps like "6h", "6h ago", "6 hours ago",
+# "2d", "2 days ago", "1w", "30m", "30 minutes ago"
+_REL_TIME_RE = re.compile(
+    r"(\d+)\s*(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h(?:our)?s?|d(?:ay)?s?|w(?:eek)?s?)",
+    re.IGNORECASE,
+)
+_REL_UNIT_SECONDS = {
+    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+    "w": 604800, "week": 604800, "weeks": 604800,
+}
+
+
+def _parse_timestamp(raw: str) -> datetime | None:
+    """
+    Parse a timestamp string into a UTC-naive datetime.
+
+    Handles:
+    - Unix epoch ms/s as a digit string  e.g. "1713234000000"
+    - Relative strings                   e.g. "6h", "6h ago", "6 hours ago", "2d"
+    - ISO-8601                           e.g. "2026-04-16T01:50:00Z"
+    """
+    if not raw:
+        return None
+
+    raw = raw.strip()
+
+    # ── Unix epoch (all digits) ───────────────────────────────────────────────
+    if raw.isdigit():
+        ms = int(raw)
+        try:
+            return datetime.utcfromtimestamp(ms / 1000 if ms > 1e10 else ms)
+        except (OSError, OverflowError, ValueError):
+            return None
+
+    # ── Relative time string ("6h", "6 hours ago", "2d", "30m") ─────────────
+    m = _REL_TIME_RE.search(raw)
+    if m:
+        n    = int(m.group(1))
+        unit = m.group(2).lower().rstrip("s")   # normalise plural
+        # map to canonical key
+        seconds = None
+        for key, val in _REL_UNIT_SECONDS.items():
+            if unit == key or unit == key.rstrip("s"):
+                seconds = val
+                break
+        if seconds is None:
+            # fallback: try full token
+            seconds = _REL_UNIT_SECONDS.get(unit)
+        if seconds is not None:
+            import datetime as _dt
+            return datetime.utcnow() - _dt.timedelta(seconds=n * seconds)
+
+    # ── ISO-8601 ──────────────────────────────────────────────────────────────
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(raw[: len(fmt) + 6], fmt)
+        except ValueError:
+            continue
+
+    return None  # truly unparseable
+
+
+def hour_filter(posts: list, max_hours: int) -> tuple[list, int]:
+    """
+    Keep only posts posted within the last `max_hours` hours.
+
+    - Posts WITH a parseable timestamp that is older than the cutoff → REMOVED.
+    - Posts with NO parseable timestamp → also REMOVED when a strict hour
+      filter is active (we can't confirm they're recent).
+
+    Returns (filtered_posts, removed_count).
+    """
+    import datetime as _dt
+    cutoff = datetime.utcnow() - _dt.timedelta(hours=max_hours)
+    kept, removed = [], 0
+    for p in posts:
+        ts = _parse_timestamp(p.get("_posted_at", ""))
+        if ts is not None and ts >= cutoff:
+            kept.append(p)
+        else:
+            # ts is None (unparseable) OR ts < cutoff (too old) → drop
+            removed += 1
+    return kept, removed
+
+
 def build_card(p: dict) -> str:
     """Return clean HTML for a single post card."""
     # Escape every user-supplied string to prevent HTML injection
@@ -448,6 +702,7 @@ def build_card(p: dict) -> str:
     snippet  = html_lib.escape(p["Snippet"])
     post_url = html_lib.escape(p["Post Link"])
     likes    = p["Likes"]
+    posted   = html_lib.escape(p.get("Posted", ""))
 
     # Avatar
     if p["Photo URL"]:
@@ -467,6 +722,12 @@ def build_card(p: dict) -> str:
     hl_block  = f'<div class="card-hl">{headline}</div>'  if headline else ""
     snip_block = f'<div class="card-snip">"{snippet}"</div>' if snippet else ""
 
+    # Date badge
+    if posted:
+        date_block = f'<div class="badge-date">🕐 {posted} IST</div>'
+    else:
+        date_block = ''
+
     return f"""
 <div class="card">
   <div class="avatar-row">
@@ -477,6 +738,7 @@ def build_card(p: dict) -> str:
     </div>
   </div>
   {snip_block}
+  {date_block}
   <div class="badge-likes">❤️ {likes:,} Reactions</div>
   <a href="{post_url}" target="_blank" rel="noopener noreferrer" class="btn-li">
     🔗&nbsp; View Post on LinkedIn
@@ -487,7 +749,7 @@ def build_card(p: dict) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SCRAPE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-if st.button("🚀  START SCRAPING", use_container_width=True):
+if st.button("🚀  START AGGRESSIVE SCRAPING", use_container_width=True):
     if not keyword.strip():
         st.error("Please enter a keyword first.")
         st.stop()
@@ -502,14 +764,14 @@ if st.button("🚀  START SCRAPING", use_container_width=True):
 
     try:
         # ── 1. Start actor ────────────────────────────────────────────────────
-        status_msg.info(f"🚀 Starting Apify actor for **{keyword}** …")
+        status_msg.info(f"🚀 Starting AGGRESSIVE scrape for **{keyword}** (maxPosts={max_posts}) …")
         progress_bar.progress(5)
 
         run_url = f"{APIFY_BASE}/acts/{ACTOR_ID}/runs?token={token}"
         payload = {
             "keywords":   keyword.strip(),
-            "datePosted": time_period,
-            "maxPosts":   80,
+            "datePosted": apify_date_param,
+            "maxPosts":   max_posts,        # driven by the aggressiveness slider
             "sortBy":     "date_posted",
         }
 
@@ -544,7 +806,8 @@ if st.button("🚀  START SCRAPING", use_container_width=True):
         progress_bar.progress(15)
 
         run_status_url = f"{APIFY_BASE}/actor-runs/{run_id}?token={token}"
-        max_wait       = 300
+        # Scale timeout with aggressiveness: 300s base + 2s per post above 100
+        max_wait       = max(300, 300 + (max_posts - 100) * 2)
         poll_interval  = 4
         elapsed        = 0
 
@@ -594,22 +857,37 @@ if st.button("🚀  START SCRAPING", use_container_width=True):
         if debug_mode and debug_box:
             debug_box.markdown(f"### 🐛 Raw items: **{len(raw_items)}**")
             if raw_items and isinstance(raw_items[0], dict):
+                first = raw_items[0]
                 debug_box.markdown("**First item keys:**")
-                debug_box.code(str(list(raw_items[0].keys())))
+                debug_box.code(str(list(first.keys())))
+                # Show timestamp fields so we can verify parsing
+                ts_fields = {k: first[k] for k in (
+                    "postedAt", "posted_at", "publishedAt", "createdAt",
+                    "postedDate", "timestamp", "date", "time",
+                    "relativeTime", "relative_time",
+                ) if k in first}
+                debug_box.markdown("**Timestamp fields found:**")
+                debug_box.json(ts_fields if ts_fields else {"note": "none found"})
                 debug_box.markdown("**First item full:**")
-                debug_box.json(raw_items[0])
+                debug_box.json(first)
 
         # ── 4. Parse ──────────────────────────────────────────────────────────
         posts = parse_posts(raw_items)
 
-        # ── 5. Strict keyword filter ──────────────────────────────────────────
+        # ── 5. Hour-level client-side filter (for 1h / 2h / 3h options) ──────
+        hour_removed = 0
+        if hour_cutoff and posts:
+            posts, hour_removed = hour_filter(posts, hour_cutoff)
+
+        # ── 6. Strict keyword filter ──────────────────────────────────────────
         removed_count = 0
         if strict_filter and posts:
             posts, removed_count = strict_keyword_filter(posts, keyword)
 
-        # Drop internal field before DataFrame/export
+        # Drop internal fields before DataFrame/export
         for p in posts:
             p.pop("_full_text", None)
+            p.pop("_posted_at", None)
 
         progress_bar.progress(100)
         status_msg.empty()
@@ -619,7 +897,14 @@ if st.button("🚀  START SCRAPING", use_container_width=True):
         # RESULTS
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         if not posts:
-            if removed_count > 0:
+            if hour_removed > 0 and removed_count == 0:
+                st.warning(
+                    f"⏱ **No posts found within {time_label.lower()}.** "
+                    f"Apify returned {hour_removed} post(s) but all were older than "
+                    f"**{hour_cutoff} hour(s)**. "
+                    f"Try switching to **Past 24 Hours** or a wider window."
+                )
+            elif removed_count > 0:
                 st.warning(
                     f"🎯 **Strict filter removed all {removed_count} results** — none of "
                     f"the posts Apify returned actually contained all words of "
@@ -641,7 +926,7 @@ if st.button("🚀  START SCRAPING", use_container_width=True):
         df = pd.DataFrame(posts)
 
         st.balloons()
-        st.success(f"✅ Found **{len(df)} relevant posts** for **\"{keyword}\"** · *{time_period}*")
+        st.success(f"✅ Found **{len(df)} relevant posts** for **\"{keyword}\"** · *{time_label}*")
 
         if removed_count > 0:
             st.info(
