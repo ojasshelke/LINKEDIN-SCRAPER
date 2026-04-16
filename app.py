@@ -22,28 +22,6 @@ ACTOR_ID   = "benjarapi~linkedin-post-search"
 APIFY_BASE = "https://api.apify.com/v2"
 
 
-def _default_apify_token() -> str:
-    """
-    Token resolution order:
-    1) APIFY_TOKEN environment variable (also set via .env + load_dotenv)
-    2) Streamlit Cloud / local secrets: st.secrets['APIFY_TOKEN']
-    """
-    for key in ("APIFY_TOKEN", "APIFY_API_TOKEN"):
-        t = (os.environ.get(key) or "").strip()
-        if t:
-            return t
-    try:
-        for key in ("APIFY_TOKEN", "APIFY_API_TOKEN"):
-            try:
-                val = st.secrets[key]
-                if val:
-                    return str(val).strip()
-            except KeyError:
-                continue
-    except Exception:
-        pass
-    return ""
-
 st.set_page_config(
     page_title="LinkedIn Post Finder",
     page_icon="🔍",
@@ -51,7 +29,28 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Cache the resolved token once per session so reruns don't re-read the env on every click.
+
+def _default_apify_token() -> str:
+    """
+    Token resolution order (called AFTER set_page_config so st.secrets is safe):
+    1. APIFY_TOKEN / APIFY_API_TOKEN env var  (local .env via dotenv)
+    2. st.secrets['APIFY_TOKEN']              (Streamlit Cloud Secrets)
+    """
+    for key in ("APIFY_TOKEN", "APIFY_API_TOKEN"):
+        t = (os.environ.get(key) or "").strip()
+        if t:
+            return t
+    for key in ("APIFY_TOKEN", "APIFY_API_TOKEN"):
+        try:
+            val = st.secrets.get(key, "")
+            if val:
+                return str(val).strip()
+        except Exception:
+            pass
+    return ""
+
+
+# Cache the resolved token once per session.
 if "resolved_apify_token" not in st.session_state:
     st.session_state["resolved_apify_token"] = _default_apify_token()
 
