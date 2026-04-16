@@ -234,6 +234,38 @@ div.stDownloadButton > button:hover {
 /* Progress bar */
 .stProgress > div > div > div { background: linear-gradient(90deg,#0A66C2,#38bdf8) !important; }
 
+/* Stats cards */
+.stats-row {
+    display: flex; gap: 16px; margin: 1.2rem 0 1.5rem;
+    flex-wrap: wrap;
+}
+.stat-card {
+    flex: 1; min-width: 180px;
+    background: rgba(12,20,38,.72);
+    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 16px; padding: 20px 22px;
+    text-align: center;
+    transition: transform .25s, box-shadow .25s, border-color .25s;
+    box-shadow: 0 4px 20px rgba(0,0,0,.25);
+}
+.stat-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 36px rgba(0,0,0,.35);
+    border-color: rgba(10,102,194,.45);
+}
+.stat-value {
+    font-size: 2.2rem; font-weight: 900; letter-spacing: -.03em;
+    line-height: 1.1; margin-bottom: 4px;
+}
+.stat-value.blue  { color: #38bdf8; }
+.stat-value.pink  { color: #fb7185; }
+.stat-value.green { color: #4ade80; }
+.stat-label {
+    font-size: .82rem; color: #64748b; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em;
+}
+
 div[data-testid="stAlert"] { border-radius: 12px !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -304,6 +336,7 @@ with col_kw:
     )
 # Display label → (Apify datePosted value, client-side hour cutoff or None)
 TIME_OPTIONS = {
+    "Today":        ("past-24h", "today"),
     "Past 1 Hour":  ("past-24h", 1),
     "Past 2 Hours": ("past-24h", 2),
     "Past 3 Hours": ("past-24h", 3),
@@ -313,7 +346,7 @@ TIME_OPTIONS = {
 }
 
 with col_tf:
-    time_label  = st.selectbox("Time Window", list(TIME_OPTIONS.keys()), index=3)
+    time_label  = st.selectbox("Time Window", list(TIME_OPTIONS.keys()), index=4)
     apify_date_param, hour_cutoff = TIME_OPTIONS[time_label]
 
 # Aggressiveness slider
@@ -698,6 +731,23 @@ def hour_filter(posts: list, max_hours: int) -> tuple[list, int]:
     return kept, removed
 
 
+def today_filter(posts: list) -> tuple[list, int]:
+    """
+    Keep only posts posted today (from midnight 00:00 UTC to now).
+
+    Returns (filtered_posts, removed_count).
+    """
+    midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    kept, removed = [], 0
+    for p in posts:
+        ts = _parse_timestamp(p.get("_posted_at", ""))
+        if ts is not None and ts >= midnight:
+            kept.append(p)
+        else:
+            removed += 1
+    return kept, removed
+
+
 def build_card(p: dict) -> str:
     """Return clean HTML for a single post card."""
     # Escape every user-supplied string to prevent HTML injection
@@ -902,7 +952,10 @@ if st.session_state.get("raw_items") is not None:
 
     hour_removed = 0
     if hc and posts:
-        posts, hour_removed = hour_filter(posts, hc)
+        if hc == "today":
+            posts, hour_removed = today_filter(posts)
+        else:
+            posts, hour_removed = hour_filter(posts, hc)
 
     removed_count = 0
     if sf and posts:
@@ -942,11 +995,32 @@ if st.session_state.get("raw_items") is not None:
             f"showing only posts that mention **\"{kw}\"**."
         )
 
-    if st.button("🔄 New Search"):
-        _reset_run()
-        st.rerun()
+
 
     st.markdown("")
+
+    # ── Stats summary bar ─────────────────────────────────────────────────
+    total_reactions  = sum(p.get("Likes", 0) for p in posts)
+    est_impressions  = total_reactions * 80
+    total_posts      = len(posts)
+
+    st.markdown(f"""
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="stat-value blue">{total_posts}</div>
+    <div class="stat-label">📝 Total Posts</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value pink">{total_reactions:,}</div>
+    <div class="stat-label">❤️ Total Reactions</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value green">{est_impressions:,}</div>
+    <div class="stat-label">👁️ Est. Impressions</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
     st.markdown('<div class="sec-title">🏆 Scraped Posts</div>', unsafe_allow_html=True)
 
     for row_start in range(0, len(posts), 3):
