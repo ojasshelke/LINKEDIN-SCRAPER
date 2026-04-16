@@ -762,96 +762,76 @@ if st.button("🚀  START AGGRESSIVE SCRAPING", use_container_width=True):
     debug_box    = st.container() if debug_mode else None
 
     try:
-        # ── 1. Start actor ────────────────────────────────────────────────────
-        status_msg.info(f"🚀 Starting AGGRESSIVE scrape for **{keyword}** (maxPosts={max_posts}) …")
-        progress_bar.progress(5)
+        # ── Single synchronous call: start + wait + get results in one request ─
+        # Uses /run-sync-get-dataset-items which blocks until the actor finishes
+        # and returns items directly — no polling loop, works on Streamlit Cloud.
+        status_msg.info(f"🚀 Scraping LinkedIn for **{keyword}** (up to {max_posts} posts) …")
+        progress_bar.progress(10)
 
-        run_url = f"{APIFY_BASE}/acts/{ACTOR_ID}/runs?token={token}"
+        sync_url = (
+            f"{APIFY_BASE}/acts/{ACTOR_ID}/run-sync-get-dataset-items"
+            f"?token={token}&format=json&timeout=300&memory=256"
+        )
         payload = {
             "keywords":   keyword.strip(),
             "datePosted": apify_date_param,
-            "maxPosts":   max_posts,        # driven by the aggressiveness slider
+            "maxPosts":   max_posts,
             "sortBy":     "date_posted",
         }
 
         if debug_mode and debug_box:
-            debug_box.markdown("### 🐛 API Request")
-            debug_box.code(f"POST {run_url}\n\n{payload}")
+            debug_box.markdown("### 🐛 API Request (sync)")
+            debug_box.code(f"POST {sync_url}\n\n{payload}")
 
-        resp = requests.post(run_url, json=payload, timeout=30)
+        progress_bar.progress(20)
+        status_msg.info("⏳ Apify is scraping LinkedIn … this may take 30–120 seconds.")
 
-        if resp.status_code not in (200, 201):
-            st.error(f"❌ Apify returned {resp.status_code}: {resp.text[:500]}")
-            if debug_mode and debug_box:
-                debug_box.code(resp.text)
-            st.stop()
-
-        run_data   = resp.json().get("data", {})
-        run_id     = run_data.get("id", "")
-        dataset_id = run_data.get("defaultDatasetId", "")
-
-        if not run_id:
-            st.error("❌ Could not start actor run. Verify your API token.")
-            if debug_mode and debug_box:
-                debug_box.json(resp.json())
-            st.stop()
-
-        if debug_mode and debug_box:
-            debug_box.markdown("### 🐛 Run Started")
-            debug_box.code(f"Run ID: {run_id}\nDataset ID: {dataset_id}")
-
-        # ── 2. Poll until SUCCEEDED ───────────────────────────────────────────
-        status_msg.info("⏳ Waiting for Apify to finish scraping LinkedIn …")
-        progress_bar.progress(15)
-
-        run_status_url = f"{APIFY_BASE}/actor-runs/{run_id}?token={token}"
-        # Scale timeout with aggressiveness: 300s base + 2s per post above 100
-        max_wait       = max(300, 300 + (max_posts - 100) * 2)
-        poll_interval  = 4
-        elapsed        = 0
-
-        while elapsed < max_wait:
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-
-            try:
-                run_info   = requests.get(run_status_url, timeout=15).json().get("data", {})
-                run_status = run_info.get("status", "UNKNOWN")
-            except Exception:
-                continue
-
-            pct = min(15 + int((elapsed / max_wait) * 70), 85)
-            progress_bar.progress(pct)
-            status_msg.info(f"⏳ Apify status: **{run_status}** ({elapsed}s) …")
-
-            if run_status == "SUCCEEDED":
-                dataset_id = run_info.get("defaultDatasetId", dataset_id)
-                break
-            elif run_status in ("FAILED", "ABORTED", "TIMED-OUT"):
-                st.error(f"❌ Actor run ended with status: **{run_status}**.")
-                if debug_mode and debug_box:
-                    debug_box.json(run_info)
-                st.stop()
-        else:
-            st.error("⏱ Timed out waiting for Apify. Please try again.")
-            st.stop()
+        # Timeout: 300s actor timeout + 30s buffer
+        sync_resp = requests.post(sync_url, json=payload, timeout=330)
 
         progress_bar.progress(90)
-        status_msg.info("📦 Downloading results …")
 
-        # ── 3. Fetch results ──────────────────────────────────────────────────
-        items_url  = (
-            f"{APIFY_BASE}/datasets/{dataset_id}/items"
-            f"?token={token}&format=json"
-        )
-        items_resp = requests.get(items_url, timeout=30)
-
-        if items_resp.status_code != 200:
-            st.error(f"❌ Failed to fetch results: HTTP {items_resp.status_code}")
+        if sync_resp.status_code == 400:
+            st.error(f"❌ Bad request — check your keyword/params: {sync_resp.text[:400]}")
+            st.stop()
+        if sync_resp.status_code == 402:
+            st.error("❌ Apify account limit reached. Upgrade your Apify plan or reduce max posts.")
+            st.stop()
+        if sync_resp.status_code not in (200, 201):
+            st.error(f"❌ Apify returned {sync_resp.status_code}: {sync_resp.text[:500]}")
+            if debug_mode and debug_box:
+                debug_box.code(sync_resp.text)
             st.stop()
 
-        raw_items = items_resp.json()
+        raw_items = sync_resp.json()
+
+        # Apify sometimes wraps items in {"data": [...]}
+        if isinstance(raw_items, dict) and "data" in raw_items:
+            raw_items = raw_items["data"]
+
+        if not isinstance(raw_items, list):
+            st.error("❌ Unexpected response format from Apify. Enable Debug Mode for details.")
+            if debug_mode and debug_box:
+                debug_box.json(raw_items)
+            st.stop()
+
         progress_bar.progress(95)
+
+        if debug_mode and debug_box:
+            debug_box.markdown(f"### 🐛 Raw items received: **{len(raw_items)}**")
+            if raw_items and isinstance(raw_items[0], dict):
+                first = raw_items[0]
+                debug_box.markdown("**First item keys:**")
+                debug_box.code(str(list(first.keys())))
+                ts_fields = {k: first[k] for k in (
+                    "postedAt", "posted_at", "publishedAt", "createdAt",
+                    "postedDate", "timestamp", "date", "time",
+                    "relativeTime", "relative_time",
+                ) if k in first}
+                debug_box.markdown("**Timestamp fields:**")
+                debug_box.json(ts_fields if ts_fields else {"note": "none found"})
+                debug_box.markdown("**First item full:**")
+                debug_box.json(first)
 
         if debug_mode and debug_box:
             debug_box.markdown(f"### 🐛 Raw items: **{len(raw_items)}**")
