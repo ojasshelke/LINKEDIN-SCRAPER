@@ -468,16 +468,14 @@ def parse_posts(raw_items: list) -> list:
         if not isinstance(stats_obj, dict):
             stats_obj = {}
 
-        likes = 0
-        for key in ("like", "likes", "total_reactions", "reactions", "numLikes", "total"):
-            val = _safe_int(stats_obj.get(key))
-            if val > 0:
-                likes = val
-                break
-        # Root-level fallback
+        # stats.total_reactions is the int count; stats.reactions is a LIST breakdown
+        likes = _safe_int(stats_obj.get("total_reactions"))
         if likes == 0:
-            for key in ("likes", "numLikes", "likeCount", "totalReactions",
-                        "reactionCount", "reactions"):
+            likes = _safe_int(stats_obj.get("likes")) or _safe_int(stats_obj.get("like"))
+        if likes == 0:
+            # Root-level fallback
+            for key in ("total_reactions", "likes", "numLikes", "likeCount",
+                        "totalReactions", "reactionCount"):
                 val = _safe_int(item.get(key))
                 if val > 0:
                     likes = val
@@ -485,9 +483,9 @@ def parse_posts(raw_items: list) -> list:
 
         # ── Post URL ─────────────────────────────────────────────────────────
         post_url = (
-            _safe_str(item.get("url"))
+            _safe_str(item.get("post_url"))
+            or _safe_str(item.get("url"))
             or _safe_str(item.get("postUrl"))
-            or _safe_str(item.get("post_url"))
             or _safe_str(item.get("permalink"))
             or ""
         )
@@ -515,20 +513,27 @@ def parse_posts(raw_items: list) -> list:
         snippet    = (full_text[:100] + "…") if len(full_text) > 100 else full_text
 
         # ── Posted timestamp (kept for hour-level filtering) ──────────────────
-        # Try every known field; use str() so _parse_timestamp always gets a string.
-        # We check raw values (not _safe_str) first so integer epoch ms aren't lost.
-        _ts_raw = (
-            item.get("postedAt")
-            or item.get("posted_at")
-            or item.get("publishedAt")
-            or item.get("createdAt")
-            or item.get("postedDate")
-            or item.get("timestamp")
-            or item.get("date")
-            or item.get("time")
-            or item.get("relativeTime")
-            or item.get("relative_time")
-        )
+        # The actor returns posted_at as a DICT: {display_text, date, timestamp, edited}
+        _pa_obj = item.get("posted_at") or item.get("postedAt") or {}
+        if isinstance(_pa_obj, dict):
+            # Prefer the epoch ms, then ISO date string, then display_text
+            _ts_raw = (
+                _pa_obj.get("timestamp")
+                or _pa_obj.get("date")
+                or _pa_obj.get("display_text")
+            )
+        else:
+            _ts_raw = _pa_obj  # flat string / int fallback
+
+        if _ts_raw is None:
+            # Try other top-level fields
+            _ts_raw = (
+                item.get("publishedAt") or item.get("createdAt")
+                or item.get("postedDate") or item.get("timestamp")
+                or item.get("date") or item.get("relativeTime")
+                or item.get("relative_time")
+            )
+
         posted_at_raw = str(_ts_raw).strip() if _ts_raw is not None else ""
 
         # Format the posted-at value for display in IST (UTC +5:30)
@@ -538,7 +543,7 @@ def parse_posts(raw_items: list) -> list:
             ist_dt = parsed_dt + _dt.timedelta(hours=5, minutes=30)
             posted_display = ist_dt.strftime("%-I:%M %p · %d %b")   # e.g. "4:32 PM · 15 Apr"
         elif posted_at_raw:
-            posted_display = posted_at_raw  # show raw string as-is
+            posted_display = posted_at_raw
         else:
             posted_display = ""
 
