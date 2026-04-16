@@ -748,231 +748,242 @@ def build_card(p: dict) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SCRAPE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SCRAPE  (session-state driven so st.rerun() polling never freezes the UI)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _reset_run() -> None:
+    for k in ("run_id", "dataset_id", "run_started", "raw_items",
+              "scrape_keyword", "scrape_time_label", "scrape_hour_cutoff",
+              "scrape_strict", "scrape_max_posts", "scrape_date_param"):
+        st.session_state.pop(k, None)
+
+
+# ── START button ────────────────────────────────────────────────────────────
 if st.button("🚀  START AGGRESSIVE SCRAPING", use_container_width=True):
     if not keyword.strip():
         st.error("Please enter a keyword first.")
         st.stop()
     if not api_token.strip():
-        st.error("Please enter your Apify API token in the sidebar.")
+        st.error("❌ No Apify token found. Add APIFY_TOKEN to Streamlit Secrets or your .env file.")
         st.stop()
 
-    token        = api_token.strip()
-    status_msg   = st.empty()
-    progress_bar = st.progress(0)
-    debug_box    = st.container() if debug_mode else None
+    _reset_run()
 
+    token = api_token.strip()
     try:
-        # ── Single synchronous call: start + wait + get results in one request ─
-        # Uses /run-sync-get-dataset-items which blocks until the actor finishes
-        # and returns items directly — no polling loop, works on Streamlit Cloud.
-        status_msg.info(f"🚀 Scraping LinkedIn for **{keyword}** (up to {max_posts} posts) …")
-        progress_bar.progress(10)
-
-        sync_url = (
-            f"{APIFY_BASE}/acts/{ACTOR_ID}/run-sync-get-dataset-items"
-            f"?token={token}&format=json&timeout=300&memory=256"
-        )
+        run_url = f"{APIFY_BASE}/acts/{ACTOR_ID}/runs?token={token}"
         payload = {
             "keywords":   keyword.strip(),
             "datePosted": apify_date_param,
             "maxPosts":   max_posts,
             "sortBy":     "date_posted",
         }
-
-        if debug_mode and debug_box:
-            debug_box.markdown("### 🐛 API Request (sync)")
-            debug_box.code(f"POST {sync_url}\n\n{payload}")
-
-        progress_bar.progress(20)
-        status_msg.info("⏳ Apify is scraping LinkedIn … this may take 30–120 seconds.")
-
-        # Timeout: 300s actor timeout + 30s buffer
-        sync_resp = requests.post(sync_url, json=payload, timeout=330)
-
-        progress_bar.progress(90)
-
-        if sync_resp.status_code == 400:
-            st.error(f"❌ Bad request — check your keyword/params: {sync_resp.text[:400]}")
+        resp = requests.post(run_url, json=payload, timeout=30)
+        if resp.status_code not in (200, 201):
+            st.error(f"❌ Apify returned {resp.status_code}: {resp.text[:400]}")
             st.stop()
-        if sync_resp.status_code == 402:
-            st.error("❌ Apify account limit reached. Upgrade your Apify plan or reduce max posts.")
+        data = resp.json().get("data", {})
+        run_id = data.get("id", "")
+        if not run_id:
+            st.error("❌ Could not start actor run. Check your Apify token.")
             st.stop()
-        if sync_resp.status_code not in (200, 201):
-            st.error(f"❌ Apify returned {sync_resp.status_code}: {sync_resp.text[:500]}")
-            if debug_mode and debug_box:
-                debug_box.code(sync_resp.text)
-            st.stop()
+        # Persist run state across reruns
+        st.session_state["run_id"]             = run_id
+        st.session_state["dataset_id"]         = data.get("defaultDatasetId", "")
+        st.session_state["run_started"]        = time.time()
+        st.session_state["raw_items"]          = None
+        st.session_state["scrape_keyword"]     = keyword.strip()
+        st.session_state["scrape_time_label"]  = time_label
+        st.session_state["scrape_hour_cutoff"] = hour_cutoff
+        st.session_state["scrape_strict"]      = strict_filter
+        st.session_state["scrape_max_posts"]   = max_posts
+        st.session_state["scrape_date_param"]  = apify_date_param
+    except Exception as exc:
+        st.error(f"❌ Failed to start run: {exc}")
+        st.stop()
 
-        raw_items = sync_resp.json()
+    st.rerun()
 
-        # Apify sometimes wraps items in {"data": [...]}
-        if isinstance(raw_items, dict) and "data" in raw_items:
-            raw_items = raw_items["data"]
 
-        if not isinstance(raw_items, list):
-            st.error("❌ Unexpected response format from Apify. Enable Debug Mode for details.")
-            if debug_mode and debug_box:
-                debug_box.json(raw_items)
-            st.stop()
+# ── POLLING LOOP (runs on every rerun while a job is in flight) ─────────────
+if "run_id" in st.session_state and st.session_state.get("raw_items") is None:
 
-        progress_bar.progress(95)
+    token      = api_token.strip()
+    run_id     = st.session_state["run_id"]
+    dataset_id = st.session_state["dataset_id"]
+    started    = st.session_state["run_started"]
+    elapsed    = int(time.time() - started)
+    max_wait   = max(300, 300 + (st.session_state.get("scrape_max_posts", 300) - 100) * 2)
 
-        if debug_mode and debug_box:
-            debug_box.markdown(f"### 🐛 Raw items received: **{len(raw_items)}**")
-            if raw_items and isinstance(raw_items[0], dict):
-                first = raw_items[0]
-                debug_box.markdown("**First item keys:**")
-                debug_box.code(str(list(first.keys())))
-                ts_fields = {k: first[k] for k in (
-                    "postedAt", "posted_at", "publishedAt", "createdAt",
-                    "postedDate", "timestamp", "date", "time",
-                    "relativeTime", "relative_time",
-                ) if k in first}
-                debug_box.markdown("**Timestamp fields:**")
-                debug_box.json(ts_fields if ts_fields else {"note": "none found"})
-                debug_box.markdown("**First item full:**")
-                debug_box.json(first)
+    status_ph = st.empty()
+    prog_ph   = st.progress(min(10 + int(elapsed / max_wait * 80), 88))
 
-        if debug_mode and debug_box:
-            debug_box.markdown(f"### 🐛 Raw items: **{len(raw_items)}**")
-            if raw_items and isinstance(raw_items[0], dict):
-                first = raw_items[0]
-                debug_box.markdown("**First item keys:**")
-                debug_box.code(str(list(first.keys())))
-                # Show timestamp fields so we can verify parsing
-                ts_fields = {k: first[k] for k in (
-                    "postedAt", "posted_at", "publishedAt", "createdAt",
-                    "postedDate", "timestamp", "date", "time",
-                    "relativeTime", "relative_time",
-                ) if k in first}
-                debug_box.markdown("**Timestamp fields found:**")
-                debug_box.json(ts_fields if ts_fields else {"note": "none found"})
-                debug_box.markdown("**First item full:**")
-                debug_box.json(first)
+    # Check if timed out
+    if elapsed > max_wait:
+        status_ph.error("⏱ Timed out waiting for Apify. Try fewer posts or try again.")
+        _reset_run()
+        st.stop()
 
-        # ── 4. Parse ──────────────────────────────────────────────────────────
-        posts = parse_posts(raw_items)
+    # Poll run status (each call is ≤2s — safe for Streamlit Cloud)
+    try:
+        run_info   = requests.get(
+            f"{APIFY_BASE}/actor-runs/{run_id}?token={token}", timeout=10
+        ).json().get("data", {})
+        run_status = run_info.get("status", "UNKNOWN")
+        dataset_id = run_info.get("defaultDatasetId", dataset_id)
+        st.session_state["dataset_id"] = dataset_id
+    except Exception:
+        run_status = "UNKNOWN"
 
-        # ── 5. Hour-level client-side filter (for 1h / 2h / 3h options) ──────
-        hour_removed = 0
-        if hour_cutoff and posts:
-            posts, hour_removed = hour_filter(posts, hour_cutoff)
-
-        # ── 6. Strict keyword filter ──────────────────────────────────────────
-        removed_count = 0
-        if strict_filter and posts:
-            posts, removed_count = strict_keyword_filter(posts, keyword)
-
-        # Drop internal fields before DataFrame/export
-        for p in posts:
-            p.pop("_full_text", None)
-            p.pop("_posted_at", None)
-
-        progress_bar.progress(100)
-        status_msg.empty()
-        progress_bar.empty()
-
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # RESULTS
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        if not posts:
-            if hour_removed > 0 and removed_count == 0:
-                st.warning(
-                    f"⏱ **No posts found within {time_label.lower()}.** "
-                    f"Apify returned {hour_removed} post(s) but all were older than "
-                    f"**{hour_cutoff} hour(s)**. "
-                    f"Try switching to **Past 24 Hours** or a wider window."
-                )
-            elif removed_count > 0:
-                st.warning(
-                    f"🎯 **Strict filter removed all {removed_count} results** — none of "
-                    f"the posts Apify returned actually contained all words of "
-                    f"**\"{keyword}\"**. "
-                    f"Try turning off the **Strict Keyword Filter** toggle above to see "
-                    f"the raw unfiltered results, or broaden your keyword."
-                )
-            else:
-                st.warning(
-                    "😕 **No posts found.** The actor returned data but nothing could be parsed. "
-                    "Turn on **Debug Mode** in the sidebar to inspect the raw response."
-                )
-            if debug_mode and debug_box:
-                debug_box.markdown("### 🐛 First 5 raw items:")
-                for raw in raw_items[:5]:
-                    debug_box.json(raw)
-            st.stop()
-
-        df = pd.DataFrame(posts)
-
-        st.balloons()
-        st.success(f"✅ Found **{len(df)} relevant posts** for **\"{keyword}\"** · *{time_label}*")
-
-        if removed_count > 0:
-            st.info(
-                f"🎯 **Strict filter active** — removed **{removed_count} irrelevant posts** "
-                f"(e.g. 'Polaris School of Quantum') that didn't contain all words of your keyword. "
-                f"Showing only posts that genuinely mention **\"{keyword}\"**."
+    if run_status == "SUCCEEDED":
+        status_ph.info("📦 Downloading results …")
+        prog_ph.progress(92)
+        try:
+            items_resp = requests.get(
+                f"{APIFY_BASE}/datasets/{dataset_id}/items?token={token}&format=json",
+                timeout=60,
             )
+            if items_resp.status_code != 200:
+                st.error(f"❌ Failed to fetch results: HTTP {items_resp.status_code}")
+                _reset_run()
+                st.stop()
+            st.session_state["raw_items"] = items_resp.json()
+        except Exception as exc:
+            st.error(f"❌ Error fetching results: {exc}")
+            _reset_run()
+            st.stop()
+        prog_ph.progress(100)
+        status_ph.empty()
+        st.rerun()
 
-        st.markdown("")
+    elif run_status in ("FAILED", "ABORTED", "TIMED-OUT"):
+        status_ph.error(f"❌ Actor run ended with status: **{run_status}**.")
+        _reset_run()
+        st.stop()
 
-        # ── 3-column card grid ────────────────────────────────────────────────
-        st.markdown('<div class="sec-title">🏆 Scraped Posts</div>', unsafe_allow_html=True)
+    else:
+        # Still running — show live status and rerun after 3s
+        status_ph.info(f"⏳ Apify status: **{run_status}** — {elapsed}s elapsed … scraping LinkedIn")
+        time.sleep(3)
+        st.rerun()
 
-        for row_start in range(0, len(posts), 3):
-            cols = st.columns(3)
-            for col_idx in range(3):
-                post_idx = row_start + col_idx
-                if post_idx >= len(posts):
-                    break
-                with cols[col_idx]:
-                    st.markdown(build_card(posts[post_idx]), unsafe_allow_html=True)
 
-        # ── Optional raw DataFrame ────────────────────────────────────────────
-        st.markdown("")
-        if st.toggle("📄 Show Raw DataFrame", value=False):
-            st.dataframe(
-                df.drop(columns=["Photo URL"], errors="ignore"),
-                use_container_width=True,
-                hide_index=True,
-                column_config={"Post Link": st.column_config.LinkColumn("Post Link")},
+# ── RESULTS (rendered once raw_items is ready in session state) ──────────────
+if st.session_state.get("raw_items") is not None:
+
+    raw_items   = st.session_state["raw_items"]
+    kw          = st.session_state.get("scrape_keyword", keyword)
+    tl          = st.session_state.get("scrape_time_label", time_label)
+    hc          = st.session_state.get("scrape_hour_cutoff", hour_cutoff)
+    sf          = st.session_state.get("scrape_strict", strict_filter)
+
+    if debug_mode:
+        st.markdown(f"### 🐛 Raw items: **{len(raw_items)}**")
+        if raw_items and isinstance(raw_items[0], dict):
+            first = raw_items[0]
+            st.markdown("**First item keys:**")
+            st.code(str(list(first.keys())))
+            ts_fields = {k: first[k] for k in (
+                "postedAt", "posted_at", "publishedAt", "createdAt",
+                "postedDate", "timestamp", "date", "time",
+                "relativeTime", "relative_time",
+            ) if k in first}
+            st.markdown("**Timestamp fields:**")
+            st.json(ts_fields if ts_fields else {"note": "none found"})
+            st.markdown("**First item:**")
+            st.json(first)
+
+    posts = parse_posts(raw_items)
+
+    hour_removed = 0
+    if hc and posts:
+        posts, hour_removed = hour_filter(posts, hc)
+
+    removed_count = 0
+    if sf and posts:
+        posts, removed_count = strict_keyword_filter(posts, kw)
+
+    for p in posts:
+        p.pop("_full_text", None)
+        p.pop("_posted_at", None)
+
+    if not posts:
+        if hour_removed > 0 and removed_count == 0:
+            st.warning(
+                f"⏱ **No posts within {tl.lower()}.** "
+                f"{hour_removed} post(s) were older than {hc}h. "
+                f"Try **Past 24 Hours** or a wider window."
             )
+        elif removed_count > 0:
+            st.warning(
+                f"🎯 **Strict filter removed all {removed_count} results.** "
+                f"None contained all words of **\"{kw}\"**. "
+                f"Turn off the Strict Keyword Filter to see raw results."
+            )
+        else:
+            st.warning("😕 No posts found. Enable Debug Mode to inspect the raw response.")
+        if st.button("🔄 Try Again"):
+            _reset_run()
+            st.rerun()
+        st.stop()
 
-        # ── Export ────────────────────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown('<div class="sec-title">💾 Export Results</div>', unsafe_allow_html=True)
+    df = pd.DataFrame(posts)
 
-        export_df = df.drop(columns=["Photo URL"], errors="ignore")
-        fname_base = f"linkedin_{keyword.replace(' ', '_')}_{int(time.time())}"
+    st.balloons()
+    st.success(f"✅ Found **{len(df)} relevant posts** for **\"{kw}\"** · *{tl}*")
+    if removed_count > 0:
+        st.info(
+            f"🎯 Strict filter removed **{removed_count} irrelevant posts** — "
+            f"showing only posts that mention **\"{kw}\"**."
+        )
 
-        dl1, dl2, _ = st.columns([1, 1, 2])
-        dl1.download_button(
-            "📥 Download CSV",
-            data=export_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"{fname_base}.csv",
-            mime="text/csv",
+    if st.button("🔄 New Search"):
+        _reset_run()
+        st.rerun()
+
+    st.markdown("")
+    st.markdown('<div class="sec-title">🏆 Scraped Posts</div>', unsafe_allow_html=True)
+
+    for row_start in range(0, len(posts), 3):
+        cols = st.columns(3)
+        for col_idx in range(3):
+            post_idx = row_start + col_idx
+            if post_idx >= len(posts):
+                break
+            with cols[col_idx]:
+                st.markdown(build_card(posts[post_idx]), unsafe_allow_html=True)
+
+    st.markdown("")
+    if st.toggle("📄 Show Raw DataFrame", value=False):
+        st.dataframe(
+            df.drop(columns=["Photo URL"], errors="ignore"),
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Post Link": st.column_config.LinkColumn("Post Link")},
+        )
+
+    st.markdown("---")
+    st.markdown('<div class="sec-title">💾 Export Results</div>', unsafe_allow_html=True)
+    export_df  = df.drop(columns=["Photo URL"], errors="ignore")
+    fname_base = f"linkedin_{kw.replace(' ', '_')}_{int(time.time())}"
+    dl1, dl2, _ = st.columns([1, 1, 2])
+    dl1.download_button(
+        "📥 Download CSV",
+        data=export_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"{fname_base}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    try:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            export_df.to_excel(w, index=False)
+        dl2.download_button(
+            "📥 Download Excel",
+            data=buf.getvalue(),
+            file_name=f"{fname_base}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-        try:
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                export_df.to_excel(w, index=False)
-            dl2.download_button(
-                "📥 Download Excel",
-                data=buf.getvalue(),
-                file_name=f"{fname_base}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        except Exception:
-            dl2.caption("Install `openpyxl` for Excel export.")
-
-    except requests.exceptions.Timeout:
-        st.error("⏱ Request timed out. Please try again.")
-    except requests.exceptions.ConnectionError:
-        st.error("🌐 Connection error. Check your internet connection.")
-    except Exception as exc:
-        st.error(f"❌ Unexpected error: {exc}")
-        if debug_mode:
-            import traceback
-            st.code(traceback.format_exc())
+    except Exception:
+        dl2.caption("Install `openpyxl` for Excel export.")
