@@ -383,19 +383,35 @@ def _run_scrape(platform, keyword, time_period, custom_dates, token, max_posts, 
                     if debug and raw_items:
                         st.json(raw_items[0])
 
-                    posts = (
+                    new_posts = (
                         _ingest_linkedin(raw_items, keyword, time_period, custom_dates)
                         if platform == "linkedin"
                         else _ingest_x(raw_items, keyword, time_period, custom_dates)
                     )
 
-                    st.session_state[f"posts_{platform}"] = posts
+                    # If accumulate mode is ON, merge with old posts
+                    if st.session_state.get("accumulate_mode", False):
+                        existing = st.session_state.get(f"posts_{platform}", [])
+                        if existing and st.session_state.get(f"last_keyword_{platform}", "") == keyword.strip():
+                            new_aids = {p["ActivityID"] for p in new_posts if p["ActivityID"]}
+                            for old_p in existing:
+                                old_aid = old_p.get("ActivityID", "")
+                                if old_aid and old_aid not in new_aids:
+                                    new_posts.append(old_p)
+                                    new_aids.add(old_aid)
+                            new_posts.sort(
+                                key=lambda p: p["PostedDT"] or datetime.min.replace(tzinfo=timezone.utc),
+                                reverse=True,
+                            )
+                            st.write(f"📚 Accumulated: **{len(new_posts)}** unique posts (merged with previous)")
+
+                    st.session_state[f"posts_{platform}"] = new_posts
                     st.session_state[f"last_keyword_{platform}"] = keyword.strip()
                     st.session_state[f"last_period_{platform}"] = time_period
                     st.session_state[f"last_dates_{platform}"] = custom_dates
                     st.session_state[f"scraped_at_{platform}"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    status_ui.update(label=f"✅ Found {len(posts)} posts!", state="complete")
+                    status_ui.update(label=f"✅ Found {len(new_posts)} posts!", state="complete")
                     st.balloons()
                     return
 
@@ -434,9 +450,10 @@ def _render_results(platform):
     cnt_today = sum(1 for p in posts if p.get("PostedDT") and p["PostedDT"] >= midnight_ist)
     cnt_1h = sum(1 for p in posts if p.get("PostedDT") and p["PostedDT"] >= now_utc - timedelta(hours=1))
     total_reactions = sum(p.get("Likes", 0) for p in posts)
-    est_impressions = total_reactions * 80
+    est_reach = total_reactions * 80
 
     label = "LinkedIn" if platform == "linkedin" else "X (Twitter)"
+    accum_tag = " *(accumulated)*" if st.session_state.get("accumulate_mode") else ""
 
     per_str = per
     if per == "custom" and dates and len(dates) > 0:
@@ -446,8 +463,15 @@ def _render_results(platform):
             per_str = f"Range: {dates[0].strftime('%d %b')} – {dates[1].strftime('%d %b')}"
 
     st.success(
-        f'✅ Found **{len(df)}** relevant posts on {label} for **"{kw}"** · '
+        f'✅ Found **{len(df)}** relevant posts{accum_tag} on {label} for **"{kw}"** · '
         f"*{per_str}* — last scraped {scraped_at}"
+    )
+
+    # Disclaimer about search non-determinism
+    st.info(
+        f"📊 **Note:** {label} search returns a **sample** of matching posts, not the full universe. "
+        "The exact count may vary between runs. Enable **📚 Accumulate across runs** in the sidebar "
+        "to build a larger dataset over multiple scrapes."
     )
 
     mc1, mc2, mc3, mc4, mc5 = st.columns(5)
@@ -455,7 +479,10 @@ def _render_results(platform):
     mc2.metric("📅 Today", cnt_today)
     mc3.metric("🕐 Past 1 Hour", cnt_1h)
     mc4.metric("❤️ Total Reactions", f"{total_reactions:,}")
-    mc5.metric("👀 Est. Impressions", f"{est_impressions:,}")
+    mc5.metric(
+        "👀 Est. Reach", f"{est_reach:,}",
+        help="Estimated reach = reactions × 80. Based on the scraped sample only, not all posts.",
+    )
     st.markdown("")
 
     df_display = df.drop(columns=["PostedDT", "AuthorImg", "ActivityID"], errors="ignore")
@@ -746,6 +773,12 @@ with st.sidebar:
     st.caption("Single token powers both LinkedIn & X.")
     st.markdown("---")
     debug_mode = st.toggle("🐛 Debug Mode", value=False)
+    accumulate_mode = st.toggle(
+        "📚 Accumulate across runs",
+        value=False,
+        help="**ON:** each scrape merges unique new posts with previous results (builds a larger dataset). "
+             "**OFF (default):** each scrape is a clean slate — honest, consistent counts.",
+    )
     st.markdown("---")
     st.info(
         "**Dual Platforms Support:**\n"
@@ -760,6 +793,8 @@ with st.sidebar:
 for _key in ("posts_linkedin", "posts_x"):
     if _key not in st.session_state:
         st.session_state[_key] = []
+if "accumulate_mode" not in st.session_state:
+    st.session_state.accumulate_mode = False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -805,6 +840,7 @@ with tab_li:
         elif not api_token.strip():
             st.error("Please provide your Apify API Token in the sidebar.")
         else:
+            st.session_state.accumulate_mode = accumulate_mode
             _run_scrape("linkedin", keyword_li, period_li, dates_li, api_token, max_li, debug_mode)
 
     _render_results("linkedin")
@@ -848,6 +884,7 @@ with tab_x:
         elif not api_token.strip():
             st.error("Please provide your Apify API Token in the sidebar.")
         else:
+            st.session_state.accumulate_mode = accumulate_mode
             _run_scrape("x", keyword_x, period_x, dates_x, api_token, max_x, debug_mode)
 
     _render_results("x")
